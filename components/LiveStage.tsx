@@ -67,7 +67,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
       function subscribed(track:RemoteTrack,_publication:unknown,participant:RemoteParticipant) {
         if(senderInfo(participant).role!=='host')return;
         if(track.kind===Track.Kind.Video){
-          const el=track.attach();el.className='stream-video';el.autoplay=true;el.playsInline=true;
+          const el=track.attach() as HTMLVideoElement;el.className='stream-video';el.autoplay=true;el.playsInline=true;
           videoRef.current?.replaceChildren(el);setLive(true);
         }else if(track.kind===Track.Kind.Audio){
           const el=track.attach();el.autoplay=true;audioRef.current?.replaceChildren(el);
@@ -103,7 +103,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
         await active.localParticipant.enableCameraAndMicrophone();
         if(index!==connectionRef.current){void active.disconnect();return;}
         const camera=active.localParticipant.getTrackPublication(Track.Source.Camera)?.videoTrack;
-        if(camera){const el=camera.attach();el.className='stream-video';el.muted=true;el.autoplay=true;el.playsInline=true;videoRef.current?.replaceChildren(el);}
+        if(camera){const el=camera.attach() as HTMLVideoElement;el.className='stream-video';el.muted=true;el.autoplay=true;el.playsInline=true;videoRef.current?.replaceChildren(el);}
         setBroadcasting(true);setLive(true);
       }
     }catch(e){if(room)void room.disconnect();if(index===connectionRef.current){activeRoomRef.current=null;setStatus('offline');setError(e instanceof Error?e.message:'Connection failed.');}}
