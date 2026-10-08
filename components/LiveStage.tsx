@@ -14,10 +14,12 @@ type Props={
   openLogin:()=>void;
 };
 
-const STREAM_URL='https://stream.langeelounge.com/langee/?autoplay=true&muted=true&controls=true&playsInline=true';
+const HLS_URL='https://stream.langeelounge.com/langee/index.m3u8';
 
 export default function LiveStage({admin,token,username,assignments,openLogin}:Props) {
   const [live,setLive]=useState(false);
+  const [playerError,setPlayerError]=useState('');
+  const mainVideoRef=useRef<HTMLVideoElement>(null);
   const [pondLive,setPondLive]=useState(false);
   const [pondAudioBlocked,setPondAudioBlocked]=useState(false);
   const pondRoomRef=useRef<Room|null>(null);
@@ -42,6 +44,65 @@ export default function LiveStage({admin,token,username,assignments,openLogin}:P
     const timer=setInterval(()=>{void checkMain();},12000);
     return ()=>{disposed=true;clearInterval(timer);};
   },[]);
+
+  // Render the HLS media directly into a portrait <video> element.
+  // An iframe embeds MediaMTX's landscape-shaped page and creates huge bars.
+  useEffect(()=>{
+    const video=mainVideoRef.current;
+    if(!live||!video)return;
+    let disposed=false;
+    let hls:import('hls.js').default|null=null;
+    setPlayerError('');
+    video.muted=true; // Browsers generally require muted autoplay.
+    video.playsInline=true;
+
+    const tryPlay=()=>{if(!disposed)void video.play().catch(()=>{});};
+    const start=async()=>{
+      const nativeHls=video.canPlayType('application/vnd.apple.mpegurl')!=='';
+      const isAppleMobile=/iPad|iPhone|iPod/i.test(navigator.userAgent);
+      if(isAppleMobile && nativeHls){
+        video.src=HLS_URL;
+        video.addEventListener('loadedmetadata',tryPlay);
+        tryPlay();
+        return;
+      }
+      try{
+        const {default:Hls}=await import('hls.js');
+        if(disposed)return;
+        if(Hls.isSupported()){
+          const instance=new Hls({lowLatencyMode:true,enableWorker:true});
+          hls=instance;
+          instance.on(Hls.Events.MEDIA_ATTACHED,()=>{if(!disposed)instance.loadSource(HLS_URL);});
+          instance.on(Hls.Events.MANIFEST_PARSED,tryPlay);
+          instance.on(Hls.Events.ERROR,(_event,data)=>{
+            if(disposed||!data.fatal)return;
+            if(data.type===Hls.ErrorTypes.NETWORK_ERROR){
+              // Brief Wi-Fi/HLS interruptions can recover without losing chat.
+              instance.startLoad();
+            }else{
+              setPlayerError('Video playback had a problem. Try refreshing the page.');
+            }
+          });
+          instance.attachMedia(video);
+        }else if(nativeHls){
+          video.src=HLS_URL;tryPlay();
+        }else{
+          setPlayerError('This browser does not support live HLS playback.');
+        }
+      }catch{
+        if(!disposed)setPlayerError('Unable to start the video player.');
+      }
+    };
+    void start();
+    return ()=>{
+      disposed=true;
+      video.removeEventListener('loadedmetadata',tryPlay);
+      hls?.destroy();
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    };
+  },[live]);
 
   // Duck Pond is separate from the main video and Supabase chat.
   // Only join the LiveKit pond room when OBS's ingress is actually online.
@@ -157,14 +218,18 @@ export default function LiveStage({admin,token,username,assignments,openLogin}:P
     <div className={`stage-layout${pondLive?' pond-live-layout':''}`}>
       <section className="stage-main card" style={{width:'100%',maxWidth:460,justifySelf:'center',marginInline:'auto'}}>
         <div className="stream-frame" style={{width:'100%',height:'auto',aspectRatio:'9 / 16',maxWidth:'none',overflow:'hidden',position:'relative'}}>
-          {live ? <iframe
-            title="Langee main live stream"
-            src={STREAM_URL}
-            allow="autoplay; fullscreen; picture-in-picture"
-            allowFullScreen
-            scrolling="no"
-            style={{position:'absolute',inset:0,width:'100%',height:'100%',border:0,display:'block',background:'#020705'}}
-          /> : <div className="stream-empty">
+          {live ? <>
+            <video
+              ref={mainVideoRef}
+              aria-label="Langee main live stream"
+              className="stream-video"
+              controls autoPlay muted playsInline
+              style={{position:'absolute',inset:0,width:'100%',height:'100%',display:'block',objectFit:'contain',background:'#020705'}}
+            />
+            {playerError&&<div role="alert" style={{position:'absolute',left:10,right:10,bottom:55,zIndex:4,background:'#112b20ed',padding:'10px 12px',borderRadius:8,fontSize:12}}>
+              {playerError} <a href="https://stream.langeelounge.com/langee/" target="_blank" rel="noopener noreferrer">Open stream directly</a>
+            </div>}
+          </> : <div className="stream-empty">
             <div className="orbit">◉</div>
             <span className="eyebrow">LANGEE LIVE</span>
             <h2>We&apos;re Between Breaks</h2>
