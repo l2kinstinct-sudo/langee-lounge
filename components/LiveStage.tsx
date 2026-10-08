@@ -45,6 +45,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
   const [status,setStatus]=useState<'connecting'|'connected'|'offline'>('connecting');
   const [live,setLive]=useState(false);
   const [pondLive,setPondLive]=useState(false);
+  const [pondAudioBlocked,setPondAudioBlocked]=useState(false);
   const [broadcasting,setBroadcasting]=useState(false);
   const [watchers,setWatchers]=useState(0);
   const [error,setError]=useState('');
@@ -53,6 +54,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
   const [messages,setMessages]=useState<Chat[]>([]);
   const [draft,setDraft]=useState('');
   const activeRoomRef=useRef<Room|null>(null);
+  const pondRoomRef=useRef<Room|null>(null);
   const connectionRef=useRef(0);
   const lastSent=useRef(0);
   const videoRef=useRef<HTMLDivElement>(null);
@@ -71,8 +73,8 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
     captureCleanup.current?.();captureCleanup.current=null;
     if(previous)void previous.disconnect();
     videoRef.current?.replaceChildren();audioRef.current?.replaceChildren();
-    pondVideoRef.current?.replaceChildren();pondAudioRef.current?.replaceChildren();
-    setStatus('connecting');setLive(false);setPondLive(false);setBroadcasting(false);setError('');setWatchers(0);setAudioBlocked(false);setCameraNotice('');
+    // Duck Pond is in its own LiveKit room; reconnecting the main stream must not affect it.
+    setStatus('connecting');setLive(false);setBroadcasting(false);setError('');setWatchers(0);setAudioBlocked(false);setCameraNotice('');
     let room:Room|null=null;
     try {
       const result=await fetch('/api/livekit/token',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify({role:mode})});
@@ -86,24 +88,9 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
         const people=[...active.remoteParticipants.values()];
         const host=people.some(p=>senderInfo(p).role==='host' && [...p.videoTrackPublications.values()].some(pub=>pub.source===Track.Source.Camera && !pub.isMuted));
         if(mode==='viewer')setLive(host);
-        // A Duck Pond stream is its own publisher, not another chat viewer.
-        const pond=people.some(p=>senderInfo(p).role==='pond'&&[...p.videoTrackPublications.values()].some(pub=>!pub.isMuted));
-        setPondLive(pond);
-        setWatchers(people.filter(p=>!['host','pond'].includes(senderInfo(p).role)).length+(mode==='viewer'?1:0));
+        setWatchers(people.filter(p=>senderInfo(p).role!=='host').length+(mode==='viewer'?1:0));
       }
       function subscribed(track:RemoteTrack,_publication:unknown,participant:RemoteParticipant) {
-        if(senderInfo(participant).role==='pond'){
-          if(track.kind===Track.Kind.Video){
-            const el=track.attach() as HTMLVideoElement;
-            el.className='pond-stream-video';el.autoplay=true;el.playsInline=true;
-            Object.assign(el.style,{display:'block',width:'100%',height:'100%',objectFit:'contain'});
-            pondVideoRef.current?.replaceChildren(el);setPondLive(true);
-          }else if(track.kind===Track.Kind.Audio){
-            const el=track.attach();el.autoplay=true;pondAudioRef.current?.replaceChildren(el);
-            setAudioBlocked(!active.canPlaybackAudio);
-          }
-          update();return;
-        }
         if(senderInfo(participant).role!=='host')return;
         if(track.kind===Track.Kind.Video){
           const el=track.attach() as HTMLVideoElement;el.className='stream-video';el.autoplay=true;el.playsInline=true;
@@ -211,12 +198,97 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
     void connect('viewer');
     return ()=>{++connectionRef.current;captureCleanup.current?.();captureCleanup.current=null;const room=activeRoomRef.current;activeRoomRef.current=null;void room?.disconnect();};
   },[connect]);
+  // Duck Pond lives in a *separate* LiveKit room from the main Langee broadcast/chat.
+  // WHIP/OBS ingress publishes to 'duck-pond', without the custom metadata of a browser host.
+  useEffect(()=>{
+    let disposed=false;
+    let pondRoom:Room|null=null;
+    const abort=new AbortController();
+    const isPondVideoPlaying=()=>Boolean(pondVideoRef.current?.querySelector('video'));
+    const clearPond=()=>{
+      pondVideoRef.current?.replaceChildren();
+      pondAudioRef.current?.replaceChildren();
+      setPondLive(false);
+      setPondAudioBlocked(false);
+    };
+    const connectPond=async()=>{
+      try{
+        const response=await fetch('/api/livekit/token',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({role:'viewer',room:'duck-pond'}),
+          signal:abort.signal,
+        });
+        const data=await response.json() as {token?:string;url?:string;error?:string};
+        if(!response.ok||!data.token||!data.url)throw new Error(data.error||'Duck Pond token unavailable.');
+        if(disposed)return;
+        const room=new Room({adaptiveStream:true,dynacast:true});
+        pondRoom=room;
+        pondRoomRef.current=room;
+        const refresh=()=>{
+          if(disposed)return;
+          // Hide the panel if the OBS publisher leaves or its video is unpublished.
+          const publishing=[...room.remoteParticipants.values()].some(participant=>
+            [...participant.videoTrackPublications.values()].some(publication=>publication.isSubscribed&&!publication.isMuted));
+          if(!publishing || !isPondVideoPlaying()){
+            setPondLive(false);
+            if(!publishing){
+              pondVideoRef.current?.replaceChildren();
+              pondAudioRef.current?.replaceChildren();
+              setPondAudioBlocked(false);
+            }
+          }else setPondLive(true);
+        };
+        room.on(RoomEvent.TrackSubscribed,(track)=>{
+          if(disposed)return;
+          if(track.kind===Track.Kind.Video){
+            const video=track.attach() as HTMLVideoElement;
+            video.className='pond-stream-video';video.autoplay=true;video.playsInline=true;
+            Object.assign(video.style,{display:'block',width:'100%',height:'100%',objectFit:'contain'});
+            pondVideoRef.current?.replaceChildren(video);
+            setPondLive(true);
+          }else if(track.kind===Track.Kind.Audio){
+            const audio=track.attach();audio.autoplay=true;
+            pondAudioRef.current?.replaceChildren(audio);
+            setPondAudioBlocked(!room.canPlaybackAudio);
+          }
+        });
+        room.on(RoomEvent.TrackUnsubscribed,(track)=>{
+          track.detach().forEach(element=>element.remove());
+          refresh();
+        });
+        room.on(RoomEvent.TrackUnpublished,refresh);
+        room.on(RoomEvent.TrackMuted,refresh);
+        room.on(RoomEvent.ParticipantDisconnected,refresh);
+        room.on(RoomEvent.AudioPlaybackStatusChanged,()=>{if(!disposed)setPondAudioBlocked(!room.canPlaybackAudio);});
+        room.on(RoomEvent.Disconnected,()=>{if(!disposed)clearPond();});
+        await room.connect(data.url,data.token);
+        if(disposed){void room.disconnect();return;}
+        refresh();
+      }catch(e){
+        if(!disposed && !(e instanceof DOMException&&e.name==='AbortError')){
+          console.warn('Duck Pond connection unavailable:',e);
+          clearPond();
+        }
+      }
+    };
+    void connectPond();
+    return ()=>{
+      disposed=true;abort.abort();
+      pondRoomRef.current=null;
+      void pondRoom?.disconnect();
+      pondVideoRef.current?.replaceChildren();
+      pondAudioRef.current?.replaceChildren();
+    };
+  },[]);
+
   useEffect(()=>{if(!admin && broadcasting)void connect('viewer');},[admin,broadcasting,connect]);
   useEffect(()=>{messagesEnd.current?.scrollIntoView({block:'nearest'});},[messages]);
 
   async function start(){if(!admin||busy)return;setBusy(true);try{await connect('host');}finally{setBusy(false);}}
   async function stop(){if(busy)return;setBusy(true);try{await connect('viewer');}finally{setBusy(false);}}
   async function enableAudio(){try{await activeRoomRef.current?.startAudio();setAudioBlocked(false);}catch{setError('Could not enable sound.');}}
+  async function enablePondAudio(){try{await pondRoomRef.current?.startAudio();setPondAudioBlocked(false);}catch{setPondAudioBlocked(true);}}
   async function send(event:FormEvent){
     event.preventDefault();
     const text=draft.trim();const room=activeRoomRef.current;
@@ -268,7 +340,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
     {/* Always mounted so LiveKit can attach pond video before the panel becomes visible. */}
     <section className="pond-live-panel card" aria-label="Duck Pond livestream" hidden={!pondLive}>
       <div className="pond-topline"><div><span className="eyebrow">THE DUCK POND</span><h3>Duck Pond Live</h3></div><span className="pond-live-pill">● LIVE</span></div>
-      <div className="pond-video-frame"><div className="pond-video-layer" ref={pondVideoRef}/><div className="hidden-audio" ref={pondAudioRef}/></div>
+      <div className="pond-video-frame"><div className="pond-video-layer" ref={pondVideoRef}/><div className="hidden-audio" ref={pondAudioRef}/>{pondAudioBlocked&&<button type="button" className="audio-button" onClick={enablePondAudio}>🔊 Tap to enable pond sound</button>}</div>
     </section>
     <aside className="chat-panel card"><div className="chat-header"><div><span className="eyebrow">BREAK CHAT</span><h3>Talk with the Lounge</h3></div><span className="chat-status">{status==='connected'?'● Connected':status==='connecting'?'◌ Connecting':'○ Offline'}</span></div>
       <div className="chat-messages" aria-live="polite"><div className="chat-message"><b className="host-name">Langee Lounge</b><p>Welcome to the Lounge! Make an account to join chat.</p></div>
