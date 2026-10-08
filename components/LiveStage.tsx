@@ -88,6 +88,8 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
         if(senderInfo(participant).role!=='host')return;
         if(track.kind===Track.Kind.Video){
           const el=track.attach() as HTMLVideoElement;el.className='stream-video';el.autoplay=true;el.playsInline=true;
+          // Keep the viewer video fitted to the portrait frame even if the old CSS is cached.
+          Object.assign(el.style,{display:'block',width:'100%',height:'100%',objectFit:'cover',backgroundColor:'#020705'});
           videoRef.current?.replaceChildren(el);setLive(true);
         }else if(track.kind===Track.Kind.Audio){
           const el=track.attach();el.autoplay=true;audioRef.current?.replaceChildren(el);
@@ -149,6 +151,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
           }
           if(!face)setCameraNotice('This browser cannot keep both cameras active. The stream will show the rear camera only; on iPhone, a native dual-camera broadcasting app is needed for the facecam bubble.');
           const canvas=document.createElement('canvas');canvas.width=720;canvas.height=1280;canvas.className='stream-video';
+          Object.assign(canvas.style,{display:'block',width:'100%',height:'100%',objectFit:'cover'});
           const ctx=canvas.getContext('2d');if(!ctx)throw new Error('Cannot create video canvas.');
           const mainVideo=preview,faceVideo=face;
           const render=()=>{
@@ -209,8 +212,9 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
     }catch{setError('Message could not be sent. Try reconnecting.');}
   }
   return <div className="stage-layout">
-    <section className="stage-main card">
-      <div className="stream-frame"><div className="video-layer" ref={videoRef}/>
+    {/* Force the whole player card to portrait proportions, not just the video inside it. */}
+    <section className="stage-main card" style={{width:'100%',maxWidth:460,justifySelf:'center',marginInline:'auto'}}>
+      <div className="stream-frame" style={{width:'100%',height:'auto',aspectRatio:'9 / 16',maxWidth:'none',overflow:'hidden',position:'relative'}}><div className="video-layer" style={{position:'absolute',inset:0,width:'100%',height:'100%'}} ref={videoRef}/>
         {!live&&<div className="stream-empty"><div className="orbit">◉</div><span className="eyebrow">LANGEE LIVE</span><h2>We&apos;re Between Breaks</h2><p>The stream will appear here when Langee goes live.</p></div>}
         {live&&<span className="live-chip">● LIVE</span>}
         {broadcasting&&<span className="preview-label">Your camera preview</span>}
