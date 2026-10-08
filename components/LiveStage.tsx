@@ -1,12 +1,11 @@
 'use client';
 
-import {useCallback,useEffect,useRef,useState,type FormEvent} from 'react';
+import {useCallback,useEffect,useRef,useState} from 'react';
 import {Room,RoomEvent,Track,type RemoteParticipant,type RemoteTrack} from 'livekit-client';
-import {BY_CODE,TEAMS,logo,type TeamAssignment} from '@/lib/teams';
+import type {TeamAssignment} from '@/lib/teams';
+import LoungeChat from '@/components/LoungeChat';
 
-type Chat = {id:string; name:string; userId:string|null; role:string; text:string; time:string};
 type Props={admin:boolean; token:string|null; username:string|null; userId:string|null; assignments:Record<string,TeamAssignment>; openLogin:()=>void};
-const clock=()=>new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
 
 // Broadcast a single 9:16 composited camera track. A second simultaneous camera
 // is not supported by every mobile browser/device; fall back to the rear camera.
@@ -28,19 +27,6 @@ function senderInfo(participant:RemoteParticipant) {
   try {const m=JSON.parse(participant.metadata||'{}') as {role?:string;userId?:string|null};return {role:m.role||'guest',userId:m.userId||null};}
   catch{return {role:'guest',userId:null};}
 }
-function TeamBadges({userId,assignments}:{userId:string|null; assignments:Props['assignments']}) {
-  const [expanded,setExpanded]=useState(false);
-  const codes=userId?TEAMS.filter(t=>assignments[t.code]?.userId===userId).map(t=>t.code):[];
-  if(!codes.length)return null;
-  return <span className="team-badges">
-    {codes.length===1 ? <span className="single-team"><img src={logo(codes[0])} alt=""/><span>{BY_CODE[codes[0]].name}</span></span> : <>
-      {codes.slice(0,3).map(code=><img className="team-badge-logo" src={logo(code)} title={BY_CODE[code].name} alt={BY_CODE[code].name} key={code}/>)}
-      {codes.length>3 && <button type="button" className="more-teams" aria-expanded={expanded} onClick={()=>setExpanded(!expanded)}>+{codes.length-3}</button>}
-      {expanded && <span className="badge-popup"><b>Teams in this break</b>{codes.map(code=><span key={code}><img src={logo(code)} alt=""/>{BY_CODE[code].name}</span>)}</span>}
-    </>}
-  </span>;
-}
-
 export default function LiveStage({admin,token,username,userId,assignments,openLogin}:Props) {
   const [status,setStatus]=useState<'connecting'|'connected'|'offline'>('connecting');
   const [live,setLive]=useState(false);
@@ -51,21 +37,16 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
   const [error,setError]=useState('');
   const [busy,setBusy]=useState(false);
   const [audioBlocked,setAudioBlocked]=useState(false);
-  const [messages,setMessages]=useState<Chat[]>([]);
-  const [draft,setDraft]=useState('');
   const activeRoomRef=useRef<Room|null>(null);
   const pondRoomRef=useRef<Room|null>(null);
   const connectionRef=useRef(0);
-  const lastSent=useRef(0);
   const videoRef=useRef<HTMLDivElement>(null);
   const audioRef=useRef<HTMLDivElement>(null);
   const pondVideoRef=useRef<HTMLDivElement>(null);
   const pondAudioRef=useRef<HTMLDivElement>(null);
-  const messagesEnd=useRef<HTMLDivElement>(null);
   const captureCleanup=useRef<(()=>void)|null>(null);
   const [cameraNotice,setCameraNotice]=useState('');
 
-  const addMessage=useCallback((message:Chat)=>setMessages(previous=>[...previous.slice(-119),message]),[]);
   const connect=useCallback(async (mode:'viewer'|'host')=>{
     const index=++connectionRef.current;
     const previous=activeRoomRef.current;
@@ -79,7 +60,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
     try {
       const result=await fetch('/api/livekit/token',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify({role:mode})});
       const data=await result.json() as {token?:string;url?:string;error?:string};
-      if(!result.ok || !data.token || !data.url)throw new Error(data.error||'Unable to join live chat.');
+      if(!result.ok || !data.token || !data.url)throw new Error(data.error||'Unable to connect to the video stream.');
       if(index!==connectionRef.current)return;
       room=new Room({adaptiveStream:true,dynacast:true});
       const active=room;
@@ -103,16 +84,6 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
         }
         update();
       }
-      function received(payload:Uint8Array,from:RemoteParticipant|undefined,_kind:unknown,topic?:string){
-        if(topic!=='langee-chat'||!from)return;
-        try {
-          const data=JSON.parse(new TextDecoder().decode(payload)) as {type?:string;id?:string;text?:string};
-          if(data.type!=='chat'||typeof data.text!=='string'||!data.text.trim())return;
-          const info=senderInfo(from);
-          if(!info.userId)return; // Anonymous viewers cannot send trusted chat.
-          addMessage({id:data.id?.slice(0,70)||crypto.randomUUID(),name:from.name||'Member',userId:info.userId,role:info.role,text:data.text.slice(0,250),time:clock()});
-        }catch{/* discard invalid packets */}
-      }
       active.on(RoomEvent.TrackSubscribed,subscribed);
       active.on(RoomEvent.TrackUnsubscribed,(track)=>{track.detach().forEach(el=>el.remove());update();});
       active.on(RoomEvent.ParticipantConnected,update);
@@ -121,7 +92,6 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
       active.on(RoomEvent.TrackUnpublished,update);
       active.on(RoomEvent.TrackMuted,update);
       active.on(RoomEvent.TrackUnmuted,update);
-      active.on(RoomEvent.DataReceived,received);
       active.on(RoomEvent.AudioPlaybackStatusChanged,()=>setAudioBlocked(!active.canPlaybackAudio));
       active.on(RoomEvent.Disconnected,()=>{if(activeRoomRef.current===active){setStatus('offline');setLive(false);setBroadcasting(false);}});
       await active.connect(data.url,data.token);
@@ -192,116 +162,104 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
         }
       }
     }catch(e){if(room)void room.disconnect();if(index===connectionRef.current){activeRoomRef.current=null;setStatus('offline');setError(e instanceof Error?e.message:'Connection failed.');}}
-  },[token,addMessage]);
+  },[token]);
 
   useEffect(()=>{
     void connect('viewer');
     return ()=>{++connectionRef.current;captureCleanup.current?.();captureCleanup.current=null;const room=activeRoomRef.current;activeRoomRef.current=null;void room?.disconnect();};
   },[connect]);
-  // Duck Pond lives in a *separate* LiveKit room from the main Langee broadcast/chat.
-  // WHIP/OBS ingress publishes to 'duck-pond', without the custom metadata of a browser host.
+  // Duck Pond is separate from the main video and Supabase chat.
+  // Only join the LiveKit pond room when OBS's ingress is actually online.
+  // Otherwise even an invisible/offline viewer would use LiveKit connection minutes.
   useEffect(()=>{
     let disposed=false;
     let pondRoom:Room|null=null;
-    const abort=new AbortController();
-    const isPondVideoPlaying=()=>Boolean(pondVideoRef.current?.querySelector('video'));
+    let connecting=false;
     const clearPond=()=>{
       pondVideoRef.current?.replaceChildren();
       pondAudioRef.current?.replaceChildren();
       setPondLive(false);
       setPondAudioBlocked(false);
     };
+    const disconnectPond=()=>{
+      const previous=pondRoom;
+      pondRoom=null;
+      pondRoomRef.current=null;
+      if(previous)void previous.disconnect();
+      clearPond();
+    };
     const connectPond=async()=>{
+      if(disposed||connecting||pondRoom)return;
+      connecting=true;
       try{
         const response=await fetch('/api/livekit/token',{
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
+          method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({role:'viewer',room:'duck-pond'}),
-          signal:abort.signal,
         });
         const data=await response.json() as {token?:string;url?:string;error?:string};
         if(!response.ok||!data.token||!data.url)throw new Error(data.error||'Duck Pond token unavailable.');
         if(disposed)return;
         const room=new Room({adaptiveStream:true,dynacast:true});
-        pondRoom=room;
-        pondRoomRef.current=room;
+        pondRoom=room;pondRoomRef.current=room;
         const refresh=()=>{
-          if(disposed)return;
-          // Hide the panel if the OBS publisher leaves or its video is unpublished.
-          const publishing=[...room.remoteParticipants.values()].some(participant=>
-            [...participant.videoTrackPublications.values()].some(publication=>publication.isSubscribed&&!publication.isMuted));
-          if(!publishing || !isPondVideoPlaying()){
-            setPondLive(false);
-            if(!publishing){
-              pondVideoRef.current?.replaceChildren();
-              pondAudioRef.current?.replaceChildren();
-              setPondAudioBlocked(false);
-            }
-          }else setPondLive(true);
+          if(disposed||pondRoom!==room)return;
+          const publishing=[...room.remoteParticipants.values()].some(person=>
+            person.identity==='duck-pond-obs' && [...person.videoTrackPublications.values()].some(publication=>!publication.isMuted));
+          if(!publishing)clearPond();
         };
-        room.on(RoomEvent.TrackSubscribed,(track)=>{
-          if(disposed)return;
+        room.on(RoomEvent.TrackSubscribed,(track,_,participant)=>{
+          if(disposed||pondRoom!==room||participant.identity!=='duck-pond-obs')return;
           if(track.kind===Track.Kind.Video){
             const video=track.attach() as HTMLVideoElement;
             video.className='pond-stream-video';video.autoplay=true;video.playsInline=true;
             Object.assign(video.style,{display:'block',width:'100%',height:'100%',objectFit:'contain'});
-            pondVideoRef.current?.replaceChildren(video);
-            setPondLive(true);
+            pondVideoRef.current?.replaceChildren(video);setPondLive(true);
           }else if(track.kind===Track.Kind.Audio){
             const audio=track.attach();audio.autoplay=true;
             pondAudioRef.current?.replaceChildren(audio);
             setPondAudioBlocked(!room.canPlaybackAudio);
           }
         });
-        room.on(RoomEvent.TrackUnsubscribed,(track)=>{
-          track.detach().forEach(element=>element.remove());
-          refresh();
-        });
+        room.on(RoomEvent.TrackUnsubscribed,track=>{track.detach().forEach(el=>el.remove());refresh();});
         room.on(RoomEvent.TrackUnpublished,refresh);
         room.on(RoomEvent.TrackMuted,refresh);
         room.on(RoomEvent.ParticipantDisconnected,refresh);
         room.on(RoomEvent.AudioPlaybackStatusChanged,()=>{if(!disposed)setPondAudioBlocked(!room.canPlaybackAudio);});
-        room.on(RoomEvent.Disconnected,()=>{if(!disposed)clearPond();});
+        room.on(RoomEvent.Disconnected,()=>{if(!disposed && pondRoom===room)disconnectPond();});
         await room.connect(data.url,data.token);
-        if(disposed){void room.disconnect();return;}
+        if(disposed||pondRoom!==room){void room.disconnect();return;}
         refresh();
       }catch(e){
-        if(!disposed && !(e instanceof DOMException&&e.name==='AbortError')){
-          console.warn('Duck Pond connection unavailable:',e);
-          clearPond();
-        }
-      }
+        if(!disposed){console.warn('Duck Pond connection unavailable:',e);disconnectPond();}
+      }finally{connecting=false;}
     };
-    void connectPond();
+    const checkStatus=async()=>{
+      if(disposed)return;
+      try{
+        const response=await fetch('/api/livekit/pond-status');
+        if(!response.ok)return; // Temporary API failure: don't tear down a live pond.
+        const status=await response.json() as {live?:boolean};
+        if(disposed)return;
+        if(status.live){if(!pondRoom&&!connecting)void connectPond();}
+        else disconnectPond();
+      }catch{/* No new connection on network failure. */}
+    };
+    void checkStatus();
+    const interval=setInterval(()=>{void checkStatus();},5000);
     return ()=>{
-      disposed=true;abort.abort();
-      pondRoomRef.current=null;
-      void pondRoom?.disconnect();
-      pondVideoRef.current?.replaceChildren();
-      pondAudioRef.current?.replaceChildren();
+      disposed=true;clearInterval(interval);
+      const current=pondRoom;
+      pondRoom=null;pondRoomRef.current=null;
+      void current?.disconnect();
     };
   },[]);
 
   useEffect(()=>{if(!admin && broadcasting)void connect('viewer');},[admin,broadcasting,connect]);
-  useEffect(()=>{messagesEnd.current?.scrollIntoView({block:'nearest'});},[messages]);
 
   async function start(){if(!admin||busy)return;setBusy(true);try{await connect('host');}finally{setBusy(false);}}
   async function stop(){if(busy)return;setBusy(true);try{await connect('viewer');}finally{setBusy(false);}}
   async function enableAudio(){try{await activeRoomRef.current?.startAudio();setAudioBlocked(false);}catch{setError('Could not enable sound.');}}
   async function enablePondAudio(){try{await pondRoomRef.current?.startAudio();setPondAudioBlocked(false);}catch{setPondAudioBlocked(true);}}
-  async function send(event:FormEvent){
-    event.preventDefault();
-    const text=draft.trim();const room=activeRoomRef.current;
-    if(!text||!token||!username||!room||status!=='connected'||Date.now()-lastSent.current<1000)return;
-    lastSent.current=Date.now();
-    const packet={type:'chat',id:crypto.randomUUID(),text:text.slice(0,250)};
-    try {
-      await room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(packet)),{reliable:true,topic:'langee-chat'});
-      addMessage({id:packet.id,name:username,userId,role:admin?'host':'viewer',text:packet.text,time:clock()});
-      // Local token is verified server-side; display its own profile id, not arbitrary text.
-      setDraft('');
-    }catch{setError('Message could not be sent. Try reconnecting.');}
-  }
   return <>
     <style>{`
       .stage-layout.pond-live-layout{grid-template-columns:minmax(0,460px) minmax(0,1fr);grid-template-areas:'main pond' 'main chat';align-items:start;justify-content:center;gap:16px}
@@ -342,12 +300,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
       <div className="pond-topline"><div><span className="eyebrow">THE DUCK POND</span><h3>Duck Pond Live</h3></div><span className="pond-live-pill">● LIVE</span></div>
       <div className="pond-video-frame"><div className="pond-video-layer" ref={pondVideoRef}/><div className="hidden-audio" ref={pondAudioRef}/>{pondAudioBlocked&&<button type="button" className="audio-button" onClick={enablePondAudio}>🔊 Tap to enable pond sound</button>}</div>
     </section>
-    <aside className="chat-panel card"><div className="chat-header"><div><span className="eyebrow">BREAK CHAT</span><h3>Talk with the Lounge</h3></div><span className="chat-status">{status==='connected'?'● Connected':status==='connecting'?'◌ Connecting':'○ Offline'}</span></div>
-      <div className="chat-messages" aria-live="polite"><div className="chat-message"><b className="host-name">Langee Lounge</b><p>Welcome to the Lounge! Make an account to join chat.</p></div>
-        {messages.map(m=><div className="chat-message" key={m.id}><div className="chat-user"><div className="avatar">{m.name.slice(0,1).toUpperCase()}</div><div><div className="chat-name"><b className={m.role==='host'?'host-name':''}>{m.name}</b>{m.role==='host'&&<span className="host-tag">HOST</span>}<small>{m.time}</small></div><TeamBadges userId={m.userId} assignments={assignments}/></div></div><p>{m.text}</p></div>)}<div ref={messagesEnd}/>
-      </div>
-      {token&&username?<form className="chat-compose" onSubmit={send}><div className="signed-in">Chatting as <b>{username}</b></div><div className="send-row"><input aria-label="Chat message" value={draft} maxLength={250} onChange={e=>setDraft(e.target.value)} disabled={status!=='connected'} placeholder={status==='connected'?'Type a message…':'Connecting…'}/><button className="primary" disabled={status!=='connected'||!draft.trim()}>SEND</button></div><small>Live messages are shared with viewers, but not stored after the stream.</small></form>:<div className="chat-compose"><p>Want to chat? Create a username or sign in.</p><button className="primary" onClick={openLogin}>SIGN IN / CREATE ACCOUNT</button></div>}
-    </aside>
+    <LoungeChat token={token} username={username} assignments={assignments} openLogin={openLogin}/>
   </div>
   </>;
 }
