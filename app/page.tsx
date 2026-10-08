@@ -3,6 +3,7 @@
 import {useCallback,useEffect,useState,type FormEvent,type ChangeEvent} from 'react';
 import {type Session} from '@supabase/supabase-js';
 import LiveStage from '@/components/LiveStage';
+import MemberPicker from '@/components/MemberPicker';
 import {supabaseBrowser} from '@/lib/supabase';
 import {TEAMS,logo,type LoungeState,type BreakData} from '@/lib/teams';
 
@@ -102,7 +103,7 @@ export default function HomePage(){
   async function assign(team:string,remove=false){
     if(adminBusy)return;
     if(remove && !window.confirm(`Remove ${state.assignments[team]?.username} from ${team}?`))return;
-    if(!remove && !teamUser[team]?.trim()){notify('Enter a registered username first.');return;}
+    if(!remove && !teamUser[team]?.trim()){notify('Select a registered member from the list first.');return;}
     setAdminBusy(true);
     try{await adminPost('/api/admin/team',{team,username:teamUser[team] || '',remove});notify(remove?'Team is available again.':'Team assigned successfully.');}
     catch(e){notify(e instanceof Error?e.message:'Unable to update team.');}
@@ -137,7 +138,13 @@ export default function HomePage(){
       <div className="content-split"><section className="teams-section"><div className="section-heading"><div><span className="eyebrow">CURRENT BREAK</span><h2>🏈 {state.current?.name||'Football Breaks'}</h2><p>All 32 NFL teams · one spot per team</p></div><div className="spot-counter">{32-count}<span> / 32 OPEN</span></div></div>
       <div className="team-grid">{TEAMS.map(team=>{const owner=state.assignments[team.code];return <article key={team.code} className={`team-card ${owner?'assigned':''}`}><div className="team-identity"><img loading="lazy" src={logo(team.code)} alt={`${team.name} logo`}/><div><b>{team.name}</b><small>{owner?`ASSIGNED · ${owner.username}`:'AVAILABLE'}</small></div></div><div className={`spot-tag ${owner?'taken':''}`}>{owner?'TAKEN':'1 SPOT'}</div></article>;})}</div><p className="muted">Teams are assigned by Langee to registered accounts. There is no checkout or payment system on this website.</p>
       </section><aside className="side-stack"><section className="card about-card"><span className="eyebrow">ABOUT THE LOUNGE</span><h3>Pull up a chair.</h3><p>Watch the breaks here. Create a free username to join chat and show your assigned teams next to your name.</p><p>🎥 On-site streaming</p><p>💬 Real account-based live chat</p><p>🏈 All 32 NFL teams</p></section></aside></div>
-      {admin&&<section className="card admin-section"><div className="section-heading"><div><span className="eyebrow">ADMIN · TEAM MANAGER</span><h2>Give / remove teams</h2><p>Assign a team by the member&apos;s exact username. Updates appear for everyone.</p></div></div><div className="admin-team-list">{TEAMS.map(team=><div className="admin-team-row" key={team.code}><div className="admin-team-info"><img src={logo(team.code)} alt=""/><div><b>{team.name}</b><small>{state.assignments[team.code]?.username||'Available'}</small></div></div><div className="admin-actions"><input aria-label={`Username for ${team.name}`} value={teamUser[team.code]||''} placeholder="Username" onChange={e=>setTeamUser(old=>({...old,[team.code]:e.target.value}))}/><button className="primary small" disabled={adminBusy} onClick={()=>void assign(team.code)}>GIVE</button><button className="danger small" disabled={adminBusy||!state.assignments[team.code]} onClick={()=>void assign(team.code,true)}>REMOVE</button></div></div>)}</div></section>}
+      {admin&&<section className="card admin-section"><div className="section-heading"><div><span className="eyebrow">ADMIN · TEAM MANAGER</span><h2>Give / remove teams</h2><p>Choose a registered member from the searchable list. Updates appear for everyone.</p></div></div><div className="admin-team-list">{TEAMS.map(team=><div className="admin-team-row" key={team.code}><div className="admin-team-info"><img src={logo(team.code)} alt=""/><div><b>{team.name}</b><small>{state.assignments[team.code]?.username||'Available'}</small></div></div><div className="admin-actions"><MemberPicker
+                  teamName={team.name}
+                  accessToken={session?.access_token||''}
+                  value={teamUser[team.code]||''}
+                  onSelect={username=>setTeamUser(previous=>({...previous,[team.code]:username}))}
+                  disabled={adminBusy}
+                /><button className="primary small" disabled={adminBusy} onClick={()=>void assign(team.code)}>GIVE</button><button className="danger small" disabled={adminBusy||!state.assignments[team.code]} onClick={()=>void assign(team.code,true)}>REMOVE</button></div></div>)}</div></section>}
     </>}
     {tab==='breaks'&&<section className="standalone"><span className="eyebrow">FOOTBALL BREAKS</span><h1>Breaks & replays</h1><p className="lead">Current and past breaks. A new break resets all 32 spots without deleting history.</p><div className="section-heading"><h2>Current break</h2></div><div className="breaks-grid">{state.current?<BreakCard value={state.current}/>:<div className="empty-panel">No current break yet.</div>}</div><div className="section-heading push-down"><h2>Past breaks</h2></div><div className="breaks-grid">{state.breaks.filter(b=>b.status==='past').length?state.breaks.filter(b=>b.status==='past').map(b=><BreakCard key={b.id} value={b}/>):<div className="empty-panel">Past breaks will appear here.</div>}</div>
     {admin&&<form className="card admin-form" onSubmit={newBreak}><span className="eyebrow">ADMIN</span><h3>Start new break</h3><p>The current break becomes a past break. Teams start available.</p><input required minLength={3} placeholder="Football Break #2" value={breakName} onChange={e=>setBreakName(e.target.value)}/><input type="date" value={breakDate} onChange={e=>setBreakDate(e.target.value)}/><input type="url" placeholder="Replay URL for new break (optional)" value={breakReplay} onChange={e=>setBreakReplay(e.target.value)}/><button className="primary" disabled={adminBusy}>START NEW BREAK</button></form>}
