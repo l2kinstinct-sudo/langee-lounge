@@ -20,8 +20,12 @@ export async function requestUser(request: Request): Promise<User | null> {
 }
 export async function adminUser(request: Request): Promise<User | null> {
   const user = await requestUser(request);
-  if (!user || !user.email_confirmed_at || !process.env.ADMIN_EMAIL) return null;
-  return user.email?.toLowerCase() === process.env.ADMIN_EMAIL.toLowerCase().trim() ? user : null;
+  if (!user || !user.email_confirmed_at || !user.email) return null;
+  // The second admin is optional. Both users still need verified Supabase accounts.
+  const adminEmails = [process.env.ADMIN_EMAIL, process.env.ADMIN_EMAIL_2]
+    .map(email => email?.trim().toLowerCase())
+    .filter((email): email is string => Boolean(email));
+  return adminEmails.includes(user.email.trim().toLowerCase()) ? user : null;
 }
 export function sameOrigin(request: Request) {
   const origin = request.headers.get('origin');
