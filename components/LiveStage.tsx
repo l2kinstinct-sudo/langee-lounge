@@ -126,7 +126,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
         let preview:HTMLVideoElement|null=null,face:HTMLVideoElement|null=null;
         let frame=0;
         try{
-          const rearConstraints:MediaStreamConstraints={video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false};
+          const rearConstraints:MediaStreamConstraints={video:{facingMode:{ideal:'environment'},width:{ideal:720},height:{ideal:1280}},audio:false};
           rear=await navigator.mediaDevices.getUserMedia(rearConstraints);
           preview=await cameraVideo(rear);
           try{
@@ -147,7 +147,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
               preview=await cameraVideo(rear);
             }
           }
-          if(!face)setCameraNotice('This phone/browser cannot use both cameras together. Streaming the back camera only.');
+          if(!face)setCameraNotice('This browser cannot keep both cameras active. The stream will show the rear camera only; on iPhone, a native dual-camera broadcasting app is needed for the facecam bubble.');
           const canvas=document.createElement('canvas');canvas.width=720;canvas.height=1280;canvas.className='stream-video';
           const ctx=canvas.getContext('2d');if(!ctx)throw new Error('Cannot create video canvas.');
           const mainVideo=preview,faceVideo=face;
