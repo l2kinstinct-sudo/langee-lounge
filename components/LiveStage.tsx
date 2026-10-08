@@ -44,6 +44,7 @@ function TeamBadges({userId,assignments}:{userId:string|null; assignments:Props[
 export default function LiveStage({admin,token,username,userId,assignments,openLogin}:Props) {
   const [status,setStatus]=useState<'connecting'|'connected'|'offline'>('connecting');
   const [live,setLive]=useState(false);
+  const [pondLive,setPondLive]=useState(false);
   const [broadcasting,setBroadcasting]=useState(false);
   const [watchers,setWatchers]=useState(0);
   const [error,setError]=useState('');
@@ -56,6 +57,8 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
   const lastSent=useRef(0);
   const videoRef=useRef<HTMLDivElement>(null);
   const audioRef=useRef<HTMLDivElement>(null);
+  const pondVideoRef=useRef<HTMLDivElement>(null);
+  const pondAudioRef=useRef<HTMLDivElement>(null);
   const messagesEnd=useRef<HTMLDivElement>(null);
   const captureCleanup=useRef<(()=>void)|null>(null);
   const [cameraNotice,setCameraNotice]=useState('');
@@ -68,7 +71,8 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
     captureCleanup.current?.();captureCleanup.current=null;
     if(previous)void previous.disconnect();
     videoRef.current?.replaceChildren();audioRef.current?.replaceChildren();
-    setStatus('connecting');setLive(false);setBroadcasting(false);setError('');setWatchers(0);setAudioBlocked(false);setCameraNotice('');
+    pondVideoRef.current?.replaceChildren();pondAudioRef.current?.replaceChildren();
+    setStatus('connecting');setLive(false);setPondLive(false);setBroadcasting(false);setError('');setWatchers(0);setAudioBlocked(false);setCameraNotice('');
     let room:Room|null=null;
     try {
       const result=await fetch('/api/livekit/token',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify({role:mode})});
@@ -82,9 +86,24 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
         const people=[...active.remoteParticipants.values()];
         const host=people.some(p=>senderInfo(p).role==='host' && [...p.videoTrackPublications.values()].some(pub=>pub.source===Track.Source.Camera && !pub.isMuted));
         if(mode==='viewer')setLive(host);
-        setWatchers(people.filter(p=>senderInfo(p).role!=='host').length+(mode==='viewer'?1:0));
+        // A Duck Pond stream is its own publisher, not another chat viewer.
+        const pond=people.some(p=>senderInfo(p).role==='pond'&&[...p.videoTrackPublications.values()].some(pub=>!pub.isMuted));
+        setPondLive(pond);
+        setWatchers(people.filter(p=>!['host','pond'].includes(senderInfo(p).role)).length+(mode==='viewer'?1:0));
       }
       function subscribed(track:RemoteTrack,_publication:unknown,participant:RemoteParticipant) {
+        if(senderInfo(participant).role==='pond'){
+          if(track.kind===Track.Kind.Video){
+            const el=track.attach() as HTMLVideoElement;
+            el.className='pond-stream-video';el.autoplay=true;el.playsInline=true;
+            Object.assign(el.style,{display:'block',width:'100%',height:'100%',objectFit:'contain'});
+            pondVideoRef.current?.replaceChildren(el);setPondLive(true);
+          }else if(track.kind===Track.Kind.Audio){
+            const el=track.attach();el.autoplay=true;pondAudioRef.current?.replaceChildren(el);
+            setAudioBlocked(!active.canPlaybackAudio);
+          }
+          update();return;
+        }
         if(senderInfo(participant).role!=='host')return;
         if(track.kind===Track.Kind.Video){
           const el=track.attach() as HTMLVideoElement;el.className='stream-video';el.autoplay=true;el.playsInline=true;
@@ -211,7 +230,27 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
       setDraft('');
     }catch{setError('Message could not be sent. Try reconnecting.');}
   }
-  return <div className="stage-layout">
+  return <>
+    <style>{`
+      .stage-layout.pond-live-layout{grid-template-columns:minmax(0,460px) minmax(0,1fr);grid-template-areas:'main pond' 'main chat';align-items:start;justify-content:center;gap:16px}
+      .pond-live-layout>.stage-main{grid-area:main}
+      .pond-live-layout>.pond-live-panel{grid-area:pond}
+      .pond-live-layout>.chat-panel{grid-area:chat;height:min(435px,58vh);min-height:300px}
+      .pond-live-panel{min-width:0;overflow:hidden;align-self:start}
+      .pond-live-panel[hidden]{display:none!important}
+      .pond-topline{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 15px}
+      .pond-topline h3{margin:2px 0 0;font-size:1.1rem}
+      .pond-live-pill{display:inline-block;white-space:nowrap;background:#d82e3b;border-radius:6px;padding:4px 9px;font-size:.7rem;font-weight:900}
+      .pond-video-frame{aspect-ratio:16/9;position:relative;overflow:hidden;background:#030c08}
+      .pond-video-layer{position:absolute;inset:0}
+      .pond-video-layer .pond-stream-video{width:100%;height:100%;display:block;object-fit:contain}
+      @media(max-width:850px){
+        .stage-layout.pond-live-layout{grid-template-columns:minmax(0,1fr);grid-template-areas:'main' 'pond' 'chat'}
+        .pond-live-layout>.stage-main{justify-self:center}
+        .pond-live-layout>.chat-panel{height:460px;min-height:350px}
+      }
+    `}</style>
+    <div className={`stage-layout${pondLive?' pond-live-layout':''}`}>
     {/* Force the whole player card to portrait proportions, not just the video inside it. */}
     <section className="stage-main card" style={{width:'100%',maxWidth:460,justifySelf:'center',marginInline:'auto'}}>
       <div className="stream-frame" style={{width:'100%',height:'auto',aspectRatio:'9 / 16',maxWidth:'none',overflow:'hidden',position:'relative'}}><div className="video-layer" style={{position:'absolute',inset:0,width:'100%',height:'100%'}} ref={videoRef}/>
@@ -226,11 +265,17 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
       {cameraNotice&&broadcasting&&<div className="notice warning" role="status">{cameraNotice}</div>}
       {admin&&<div className="stream-controls"><div><b>Stream controls</b><small>Only your admin account can start the camera.</small></div>{broadcasting?<button className="danger" onClick={stop} disabled={busy}>END LIVE</button>:<button className="primary" onClick={start} disabled={busy}>{busy?'CONNECTING…':'● GO LIVE'}</button>}</div>}
     </section>
+    {/* Always mounted so LiveKit can attach pond video before the panel becomes visible. */}
+    <section className="pond-live-panel card" aria-label="Duck Pond livestream" hidden={!pondLive}>
+      <div className="pond-topline"><div><span className="eyebrow">THE DUCK POND</span><h3>Duck Pond Live</h3></div><span className="pond-live-pill">● LIVE</span></div>
+      <div className="pond-video-frame"><div className="pond-video-layer" ref={pondVideoRef}/><div className="hidden-audio" ref={pondAudioRef}/></div>
+    </section>
     <aside className="chat-panel card"><div className="chat-header"><div><span className="eyebrow">BREAK CHAT</span><h3>Talk with the Lounge</h3></div><span className="chat-status">{status==='connected'?'● Connected':status==='connecting'?'◌ Connecting':'○ Offline'}</span></div>
       <div className="chat-messages" aria-live="polite"><div className="chat-message"><b className="host-name">Langee Lounge</b><p>Welcome to the Lounge! Make an account to join chat.</p></div>
         {messages.map(m=><div className="chat-message" key={m.id}><div className="chat-user"><div className="avatar">{m.name.slice(0,1).toUpperCase()}</div><div><div className="chat-name"><b className={m.role==='host'?'host-name':''}>{m.name}</b>{m.role==='host'&&<span className="host-tag">HOST</span>}<small>{m.time}</small></div><TeamBadges userId={m.userId} assignments={assignments}/></div></div><p>{m.text}</p></div>)}<div ref={messagesEnd}/>
       </div>
       {token&&username?<form className="chat-compose" onSubmit={send}><div className="signed-in">Chatting as <b>{username}</b></div><div className="send-row"><input aria-label="Chat message" value={draft} maxLength={250} onChange={e=>setDraft(e.target.value)} disabled={status!=='connected'} placeholder={status==='connected'?'Type a message…':'Connecting…'}/><button className="primary" disabled={status!=='connected'||!draft.trim()}>SEND</button></div><small>Live messages are shared with viewers, but not stored after the stream.</small></form>:<div className="chat-compose"><p>Want to chat? Create a username or sign in.</p><button className="primary" onClick={openLogin}>SIGN IN / CREATE ACCOUNT</button></div>}
     </aside>
-  </div>;
+  </div>
+  </>;
 }
