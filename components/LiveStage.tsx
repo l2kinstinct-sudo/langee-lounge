@@ -1,173 +1,48 @@
 'use client';
 
-import {useCallback,useEffect,useRef,useState} from 'react';
-import {Room,RoomEvent,Track,type RemoteParticipant,type RemoteTrack} from 'livekit-client';
+import {useEffect,useRef,useState} from 'react';
+import {Room,RoomEvent,Track} from 'livekit-client';
 import type {TeamAssignment} from '@/lib/teams';
 import LoungeChat from '@/components/LoungeChat';
 
-type Props={admin:boolean; token:string|null; username:string|null; userId:string|null; assignments:Record<string,TeamAssignment>; openLogin:()=>void};
+type Props={
+  admin:boolean;
+  token:string|null;
+  username:string|null;
+  userId:string|null;
+  assignments:Record<string,TeamAssignment>;
+  openLogin:()=>void;
+};
 
-// Broadcast a single 9:16 composited camera track. A second simultaneous camera
-// is not supported by every mobile browser/device; fall back to the rear camera.
-function drawCover(ctx:CanvasRenderingContext2D,video:HTMLVideoElement,x:number,y:number,w:number,h:number){
-  if(video.readyState<2||!video.videoWidth||!video.videoHeight)return;
-  const sourceW=video.videoWidth,sourceH=video.videoHeight;
-  const scale=Math.max(w/sourceW,h/sourceH);
-  const cropW=w/scale,cropH=h/scale;
-  ctx.drawImage(video,(sourceW-cropW)/2,(sourceH-cropH)/2,cropW,cropH,x,y,w,h);
-}
-async function cameraVideo(stream:MediaStream){
-  const video=document.createElement('video');
-  video.autoplay=true;video.muted=true;video.playsInline=true;video.srcObject=stream;
-  await video.play();
-  return video;
-}
+const STREAM_URL='https://stream.langeelounge.com/langee/?autoplay=true&muted=true&controls=true&playsInline=true';
 
-function senderInfo(participant:RemoteParticipant) {
-  try {const m=JSON.parse(participant.metadata||'{}') as {role?:string;userId?:string|null};return {role:m.role||'guest',userId:m.userId||null};}
-  catch{return {role:'guest',userId:null};}
-}
-export default function LiveStage({admin,token,username,userId,assignments,openLogin}:Props) {
-  const [status,setStatus]=useState<'connecting'|'connected'|'offline'>('connecting');
+export default function LiveStage({admin,token,username,assignments,openLogin}:Props) {
   const [live,setLive]=useState(false);
   const [pondLive,setPondLive]=useState(false);
   const [pondAudioBlocked,setPondAudioBlocked]=useState(false);
-  const [broadcasting,setBroadcasting]=useState(false);
-  const [watchers,setWatchers]=useState(0);
-  const [error,setError]=useState('');
-  const [busy,setBusy]=useState(false);
-  const [audioBlocked,setAudioBlocked]=useState(false);
-  const activeRoomRef=useRef<Room|null>(null);
   const pondRoomRef=useRef<Room|null>(null);
-  const connectionRef=useRef(0);
-  const videoRef=useRef<HTMLDivElement>(null);
-  const audioRef=useRef<HTMLDivElement>(null);
   const pondVideoRef=useRef<HTMLDivElement>(null);
   const pondAudioRef=useRef<HTMLDivElement>(null);
-  const captureCleanup=useRef<(()=>void)|null>(null);
-  const [cameraNotice,setCameraNotice]=useState('');
 
-  const connect=useCallback(async (mode:'viewer'|'host')=>{
-    const index=++connectionRef.current;
-    const previous=activeRoomRef.current;
-    activeRoomRef.current=null;
-    captureCleanup.current?.();captureCleanup.current=null;
-    if(previous)void previous.disconnect();
-    videoRef.current?.replaceChildren();audioRef.current?.replaceChildren();
-    // Duck Pond is in its own LiveKit room; reconnecting the main stream must not affect it.
-    setStatus('connecting');setLive(false);setBroadcasting(false);setError('');setWatchers(0);setAudioBlocked(false);setCameraNotice('');
-    let room:Room|null=null;
-    try {
-      const result=await fetch('/api/livekit/token',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify({role:mode})});
-      const data=await result.json() as {token?:string;url?:string;error?:string};
-      if(!result.ok || !data.token || !data.url)throw new Error(data.error||'Unable to connect to the video stream.');
-      if(index!==connectionRef.current)return;
-      room=new Room({adaptiveStream:true,dynacast:true});
-      const active=room;
-      activeRoomRef.current=active;
-      function update() {
-        const people=[...active.remoteParticipants.values()];
-        const host=people.some(p=>senderInfo(p).role==='host' && [...p.videoTrackPublications.values()].some(pub=>pub.source===Track.Source.Camera && !pub.isMuted));
-        if(mode==='viewer')setLive(host);
-        setWatchers(people.filter(p=>senderInfo(p).role!=='host').length+(mode==='viewer'?1:0));
-      }
-      function subscribed(track:RemoteTrack,_publication:unknown,participant:RemoteParticipant) {
-        if(senderInfo(participant).role!=='host')return;
-        if(track.kind===Track.Kind.Video){
-          const el=track.attach() as HTMLVideoElement;el.className='stream-video';el.autoplay=true;el.playsInline=true;
-          // Keep the viewer video fitted to the portrait frame even if the old CSS is cached.
-          Object.assign(el.style,{display:'block',width:'100%',height:'100%',objectFit:'cover',backgroundColor:'#020705'});
-          videoRef.current?.replaceChildren(el);setLive(true);
-        }else if(track.kind===Track.Kind.Audio){
-          const el=track.attach();el.autoplay=true;audioRef.current?.replaceChildren(el);
-          setAudioBlocked(!active.canPlaybackAudio);
-        }
-        update();
-      }
-      active.on(RoomEvent.TrackSubscribed,subscribed);
-      active.on(RoomEvent.TrackUnsubscribed,(track)=>{track.detach().forEach(el=>el.remove());update();});
-      active.on(RoomEvent.ParticipantConnected,update);
-      active.on(RoomEvent.ParticipantDisconnected,update);
-      active.on(RoomEvent.TrackPublished,update);
-      active.on(RoomEvent.TrackUnpublished,update);
-      active.on(RoomEvent.TrackMuted,update);
-      active.on(RoomEvent.TrackUnmuted,update);
-      active.on(RoomEvent.AudioPlaybackStatusChanged,()=>setAudioBlocked(!active.canPlaybackAudio));
-      active.on(RoomEvent.Disconnected,()=>{if(activeRoomRef.current===active){setStatus('offline');setLive(false);setBroadcasting(false);}});
-      await active.connect(data.url,data.token);
-      if(index!==connectionRef.current){void active.disconnect();return;}
-      setStatus('connected');update();
-      if(mode==='host'){
-        // Phone browsers may allow only one of the two cameras to capture.
-        // Publish one composited canvas track so viewers see the same image.
-        let rear:MediaStream|null=null,front:MediaStream|null=null, microphone:MediaStream|null=null;
-        let preview:HTMLVideoElement|null=null,face:HTMLVideoElement|null=null;
-        let frame=0;
-        try{
-          const rearConstraints:MediaStreamConstraints={video:{facingMode:{ideal:'environment'},width:{ideal:720},height:{ideal:1280}},audio:false};
-          rear=await navigator.mediaDevices.getUserMedia(rearConstraints);
-          preview=await cameraVideo(rear);
-          try{
-            front=await navigator.mediaDevices.getUserMedia({video:{facingMode:{exact:'user'},width:{ideal:480},height:{ideal:640}},audio:false});
-            face=await cameraVideo(front);
-            // iOS Safari commonly stops/mutes the first camera when opening the second.
-            if(rear.getVideoTracks().some(t=>t.readyState!=='live'||t.muted)){
-              front.getTracks().forEach(t=>t.stop());front=null;face=null;
-              rear.getTracks().forEach(t=>t.stop());
-              rear=await navigator.mediaDevices.getUserMedia(rearConstraints);
-              preview=await cameraVideo(rear);
-            }
-          }catch{
-            front?.getTracks().forEach(t=>t.stop());front=null;face=null;
-            if(rear.getVideoTracks().some(t=>t.readyState!=='live'||t.muted)){
-              rear.getTracks().forEach(t=>t.stop());
-              rear=await navigator.mediaDevices.getUserMedia(rearConstraints);
-              preview=await cameraVideo(rear);
-            }
-          }
-          if(!face)setCameraNotice('This browser cannot keep both cameras active. The stream will show the rear camera only; on iPhone, a native dual-camera broadcasting app is needed for the facecam bubble.');
-          const canvas=document.createElement('canvas');canvas.width=720;canvas.height=1280;canvas.className='stream-video';
-          Object.assign(canvas.style,{display:'block',width:'100%',height:'100%',objectFit:'cover'});
-          const ctx=canvas.getContext('2d');if(!ctx)throw new Error('Cannot create video canvas.');
-          const mainVideo=preview,faceVideo=face;
-          const render=()=>{
-            ctx.fillStyle='#000';ctx.fillRect(0,0,720,1280);
-            if(mainVideo)drawCover(ctx,mainVideo,0,0,720,1280);
-            if(faceVideo&&front?.getVideoTracks().some(t=>t.readyState==='live'&&!t.muted)){
-              const cx=592,cy=140,radius=112;
-              ctx.save();ctx.beginPath();ctx.arc(cx,cy,radius,0,Math.PI*2);ctx.clip();
-              drawCover(ctx,faceVideo,cx-radius,cy-radius,radius*2,radius*2);ctx.restore();
-              ctx.strokeStyle='#111';ctx.lineWidth=8;ctx.beginPath();ctx.arc(cx,cy,radius,0,Math.PI*2);ctx.stroke();
-            }
-            frame=requestAnimationFrame(render);
-          };
-          render();
-          const composed=canvas.captureStream(24);
-          microphone=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
-          const sound=microphone.getAudioTracks()[0];
-          const video=composed.getVideoTracks()[0];
-          const stopTracks=()=>{cancelAnimationFrame(frame);composed.getTracks().forEach(t=>t.stop());rear?.getTracks().forEach(t=>t.stop());front?.getTracks().forEach(t=>t.stop());microphone?.getTracks().forEach(t=>t.stop());preview?.pause();face?.pause();};
-          captureCleanup.current=stopTracks;
-          if(index!==connectionRef.current){stopTracks();captureCleanup.current=null;void active.disconnect();return;}
-          await active.localParticipant.publishTrack(video,{source:Track.Source.Camera,name:'portrait-dual-camera'});
-          await active.localParticipant.publishTrack(sound,{source:Track.Source.Microphone});
-          if(index!==connectionRef.current){stopTracks();captureCleanup.current=null;void active.disconnect();return;}
-          videoRef.current?.replaceChildren(canvas);
-          setBroadcasting(true);setLive(true);
-        }catch(e){
-          cancelAnimationFrame(frame);
-          rear?.getTracks().forEach(t=>t.stop());front?.getTracks().forEach(t=>t.stop());microphone?.getTracks().forEach(t=>t.stop());
-          captureCleanup.current?.();captureCleanup.current=null;
-          throw e;
-        }
-      }
-    }catch(e){if(room)void room.disconnect();if(index===connectionRef.current){activeRoomRef.current=null;setStatus('offline');setError(e instanceof Error?e.message:'Connection failed.');}}
-  },[token]);
-
+  // MediaMTX is broadcast by OBS, not by the website's LiveKit room.
+  // Never connect regular watchers to Langee's old LiveKit room.
   useEffect(()=>{
-    void connect('viewer');
-    return ()=>{++connectionRef.current;captureCleanup.current?.();captureCleanup.current=null;const room=activeRoomRef.current;activeRoomRef.current=null;void room?.disconnect();};
-  },[connect]);
+    let disposed=false;
+    const checkMain=async()=>{
+      try{
+        const response=await fetch('/api/stream/status',{cache:'no-store'});
+        if(!response.ok)throw new Error('Stream status unavailable');
+        const result=await response.json() as {live?:boolean};
+        if(!disposed)setLive(result.live===true);
+      }catch{
+        // A temporary network problem should not tear down an active player.
+      }
+    };
+    void checkMain();
+    const timer=setInterval(()=>{void checkMain();},12000);
+    return ()=>{disposed=true;clearInterval(timer);};
+  },[]);
+
   // Duck Pond is separate from the main video and Supabase chat.
   // Only join the LiveKit pond room when OBS's ingress is actually online.
   // Otherwise even an invisible/offline viewer would use LiveKit connection minutes.
@@ -254,12 +129,11 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
     };
   },[]);
 
-  useEffect(()=>{if(!admin && broadcasting)void connect('viewer');},[admin,broadcasting,connect]);
+  async function enablePondAudio(){
+    try{await pondRoomRef.current?.startAudio();setPondAudioBlocked(false);}
+    catch{setPondAudioBlocked(true);}
+  }
 
-  async function start(){if(!admin||busy)return;setBusy(true);try{await connect('host');}finally{setBusy(false);}}
-  async function stop(){if(busy)return;setBusy(true);try{await connect('viewer');}finally{setBusy(false);}}
-  async function enableAudio(){try{await activeRoomRef.current?.startAudio();setAudioBlocked(false);}catch{setError('Could not enable sound.');}}
-  async function enablePondAudio(){try{await pondRoomRef.current?.startAudio();setPondAudioBlocked(false);}catch{setPondAudioBlocked(true);}}
   return <>
     <style>{`
       .stage-layout.pond-live-layout{grid-template-columns:minmax(0,460px) minmax(0,1fr);grid-template-areas:'main pond' 'main chat';align-items:start;justify-content:center;gap:16px}
@@ -281,26 +155,31 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
       }
     `}</style>
     <div className={`stage-layout${pondLive?' pond-live-layout':''}`}>
-    {/* Force the whole player card to portrait proportions, not just the video inside it. */}
-    <section className="stage-main card" style={{width:'100%',maxWidth:460,justifySelf:'center',marginInline:'auto'}}>
-      <div className="stream-frame" style={{width:'100%',height:'auto',aspectRatio:'9 / 16',maxWidth:'none',overflow:'hidden',position:'relative'}}><div className="video-layer" style={{position:'absolute',inset:0,width:'100%',height:'100%'}} ref={videoRef}/>
-        {!live&&<div className="stream-empty"><div className="orbit">◉</div><span className="eyebrow">LANGEE LIVE</span><h2>We&apos;re Between Breaks</h2><p>The stream will appear here when Langee goes live.</p></div>}
-        {live&&<span className="live-chip">● LIVE</span>}
-        {broadcasting&&<span className="preview-label">Your camera preview</span>}
-        {audioBlocked&&<button type="button" className="audio-button" onClick={enableAudio}>🔊 Tap to enable sound</button>}
-        <div className="hidden-audio" ref={audioRef}/>
-      </div>
-      <div className="player-meta"><span>● {live?'Streaming now':'Offline'}</span><span>👥 {watchers} watching</span></div>
-      {error&&<div className="notice warning" role="alert">{error}</div>}
-      {cameraNotice&&broadcasting&&<div className="notice warning" role="status">{cameraNotice}</div>}
-      {admin&&<div className="stream-controls"><div><b>Stream controls</b><small>Only your admin account can start the camera.</small></div>{broadcasting?<button className="danger" onClick={stop} disabled={busy}>END LIVE</button>:<button className="primary" onClick={start} disabled={busy}>{busy?'CONNECTING…':'● GO LIVE'}</button>}</div>}
-    </section>
-    {/* Always mounted so LiveKit can attach pond video before the panel becomes visible. */}
-    <section className="pond-live-panel card" aria-label="Duck Pond livestream" hidden={!pondLive}>
-      <div className="pond-topline"><div><span className="eyebrow">THE DUCK POND</span><h3>Duck Pond Live</h3></div><span className="pond-live-pill">● LIVE</span></div>
-      <div className="pond-video-frame"><div className="pond-video-layer" ref={pondVideoRef}/><div className="hidden-audio" ref={pondAudioRef}/>{pondAudioBlocked&&<button type="button" className="audio-button" onClick={enablePondAudio}>🔊 Tap to enable pond sound</button>}</div>
-    </section>
-    <LoungeChat token={token} username={username} assignments={assignments} openLogin={openLogin}/>
-  </div>
+      <section className="stage-main card" style={{width:'100%',maxWidth:460,justifySelf:'center',marginInline:'auto'}}>
+        <div className="stream-frame" style={{width:'100%',height:'auto',aspectRatio:'9 / 16',maxWidth:'none',overflow:'hidden',position:'relative'}}>
+          {live ? <iframe
+            title="Langee main live stream"
+            src={STREAM_URL}
+            allow="autoplay; fullscreen; picture-in-picture"
+            allowFullScreen
+            scrolling="no"
+            style={{position:'absolute',inset:0,width:'100%',height:'100%',border:0,display:'block',background:'#020705'}}
+          /> : <div className="stream-empty">
+            <div className="orbit">◉</div>
+            <span className="eyebrow">LANGEE LIVE</span>
+            <h2>We&apos;re Between Breaks</h2>
+            <p>The stream will appear here when Langee starts streaming from OBS.</p>
+          </div>}
+          {live&&<span className="live-chip">● LIVE</span>}
+        </div>
+        <div className="player-meta"><span>● {live?'Streaming now':'Offline'}</span><span>Live from OBS</span></div>
+        {admin&&<div className="stream-controls"><div><b>Main stream controls</b><small>Start or stop Langee's main livestream in OBS on his Windows PC. Duck Pond is separate.</small></div></div>}
+      </section>
+      <section className="pond-live-panel card" aria-label="Duck Pond livestream" hidden={!pondLive}>
+        <div className="pond-topline"><div><span className="eyebrow">THE DUCK POND</span><h3>Duck Pond Live</h3></div><span className="pond-live-pill">● LIVE</span></div>
+        <div className="pond-video-frame"><div className="pond-video-layer" ref={pondVideoRef}/><div className="hidden-audio" ref={pondAudioRef}/>{pondAudioBlocked&&<button type="button" className="audio-button" onClick={enablePondAudio}>🔊 Tap to enable pond sound</button>}</div>
+      </section>
+      <LoungeChat token={token} username={username} assignments={assignments} openLogin={openLogin}/>
+    </div>
   </>;
 }
