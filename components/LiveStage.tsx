@@ -7,6 +7,23 @@ import {BY_CODE,TEAMS,logo,type TeamAssignment} from '@/lib/teams';
 type Chat = {id:string; name:string; userId:string|null; role:string; text:string; time:string};
 type Props={admin:boolean; token:string|null; username:string|null; userId:string|null; assignments:Record<string,TeamAssignment>; openLogin:()=>void};
 const clock=()=>new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+
+// Broadcast a single 9:16 composited camera track. A second simultaneous camera
+// is not supported by every mobile browser/device; fall back to the rear camera.
+function drawCover(ctx:CanvasRenderingContext2D,video:HTMLVideoElement,x:number,y:number,w:number,h:number){
+  if(video.readyState<2||!video.videoWidth||!video.videoHeight)return;
+  const sourceW=video.videoWidth,sourceH=video.videoHeight;
+  const scale=Math.max(w/sourceW,h/sourceH);
+  const cropW=w/scale,cropH=h/scale;
+  ctx.drawImage(video,(sourceW-cropW)/2,(sourceH-cropH)/2,cropW,cropH,x,y,w,h);
+}
+async function cameraVideo(stream:MediaStream){
+  const video=document.createElement('video');
+  video.autoplay=true;video.muted=true;video.playsInline=true;video.srcObject=stream;
+  await video.play();
+  return video;
+}
+
 function senderInfo(participant:RemoteParticipant) {
   try {const m=JSON.parse(participant.metadata||'{}') as {role?:string;userId?:string|null};return {role:m.role||'guest',userId:m.userId||null};}
   catch{return {role:'guest',userId:null};}
@@ -40,15 +57,18 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
   const videoRef=useRef<HTMLDivElement>(null);
   const audioRef=useRef<HTMLDivElement>(null);
   const messagesEnd=useRef<HTMLDivElement>(null);
+  const captureCleanup=useRef<(()=>void)|null>(null);
+  const [cameraNotice,setCameraNotice]=useState('');
 
   const addMessage=useCallback((message:Chat)=>setMessages(previous=>[...previous.slice(-119),message]),[]);
   const connect=useCallback(async (mode:'viewer'|'host')=>{
     const index=++connectionRef.current;
     const previous=activeRoomRef.current;
     activeRoomRef.current=null;
+    captureCleanup.current?.();captureCleanup.current=null;
     if(previous)void previous.disconnect();
     videoRef.current?.replaceChildren();audioRef.current?.replaceChildren();
-    setStatus('connecting');setLive(false);setBroadcasting(false);setError('');setWatchers(0);setAudioBlocked(false);
+    setStatus('connecting');setLive(false);setBroadcasting(false);setError('');setWatchers(0);setAudioBlocked(false);setCameraNotice('');
     let room:Room|null=null;
     try {
       const result=await fetch('/api/livekit/token',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify({role:mode})});
@@ -100,18 +120,74 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
       if(index!==connectionRef.current){void active.disconnect();return;}
       setStatus('connected');update();
       if(mode==='host'){
-        await active.localParticipant.enableCameraAndMicrophone();
-        if(index!==connectionRef.current){void active.disconnect();return;}
-        const camera=active.localParticipant.getTrackPublication(Track.Source.Camera)?.videoTrack;
-        if(camera){const el=camera.attach() as HTMLVideoElement;el.className='stream-video';el.muted=true;el.autoplay=true;el.playsInline=true;videoRef.current?.replaceChildren(el);}
-        setBroadcasting(true);setLive(true);
+        // Phone browsers may allow only one of the two cameras to capture.
+        // Publish one composited canvas track so viewers see the same image.
+        let rear:MediaStream|null=null,front:MediaStream|null=null, microphone:MediaStream|null=null;
+        let preview:HTMLVideoElement|null=null,face:HTMLVideoElement|null=null;
+        let frame=0;
+        try{
+          const rearConstraints:MediaStreamConstraints={video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false};
+          rear=await navigator.mediaDevices.getUserMedia(rearConstraints);
+          preview=await cameraVideo(rear);
+          try{
+            front=await navigator.mediaDevices.getUserMedia({video:{facingMode:{exact:'user'},width:{ideal:480},height:{ideal:640}},audio:false});
+            face=await cameraVideo(front);
+            // iOS Safari commonly stops/mutes the first camera when opening the second.
+            if(rear.getVideoTracks().some(t=>t.readyState!=='live'||t.muted)){
+              front.getTracks().forEach(t=>t.stop());front=null;face=null;
+              rear.getTracks().forEach(t=>t.stop());
+              rear=await navigator.mediaDevices.getUserMedia(rearConstraints);
+              preview=await cameraVideo(rear);
+            }
+          }catch{
+            front?.getTracks().forEach(t=>t.stop());front=null;face=null;
+            if(rear.getVideoTracks().some(t=>t.readyState!=='live'||t.muted)){
+              rear.getTracks().forEach(t=>t.stop());
+              rear=await navigator.mediaDevices.getUserMedia(rearConstraints);
+              preview=await cameraVideo(rear);
+            }
+          }
+          if(!face)setCameraNotice('This phone/browser cannot use both cameras together. Streaming the back camera only.');
+          const canvas=document.createElement('canvas');canvas.width=720;canvas.height=1280;canvas.className='stream-video';
+          const ctx=canvas.getContext('2d');if(!ctx)throw new Error('Cannot create video canvas.');
+          const mainVideo=preview,faceVideo=face;
+          const render=()=>{
+            ctx.fillStyle='#000';ctx.fillRect(0,0,720,1280);
+            if(mainVideo)drawCover(ctx,mainVideo,0,0,720,1280);
+            if(faceVideo&&front?.getVideoTracks().some(t=>t.readyState==='live'&&!t.muted)){
+              const cx=592,cy=140,radius=112;
+              ctx.save();ctx.beginPath();ctx.arc(cx,cy,radius,0,Math.PI*2);ctx.clip();
+              drawCover(ctx,faceVideo,cx-radius,cy-radius,radius*2,radius*2);ctx.restore();
+              ctx.strokeStyle='#111';ctx.lineWidth=8;ctx.beginPath();ctx.arc(cx,cy,radius,0,Math.PI*2);ctx.stroke();
+            }
+            frame=requestAnimationFrame(render);
+          };
+          render();
+          const composed=canvas.captureStream(24);
+          microphone=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+          const sound=microphone.getAudioTracks()[0];
+          const video=composed.getVideoTracks()[0];
+          const stopTracks=()=>{cancelAnimationFrame(frame);composed.getTracks().forEach(t=>t.stop());rear?.getTracks().forEach(t=>t.stop());front?.getTracks().forEach(t=>t.stop());microphone?.getTracks().forEach(t=>t.stop());preview?.pause();face?.pause();};
+          captureCleanup.current=stopTracks;
+          if(index!==connectionRef.current){stopTracks();captureCleanup.current=null;void active.disconnect();return;}
+          await active.localParticipant.publishTrack(video,{source:Track.Source.Camera,name:'portrait-dual-camera'});
+          await active.localParticipant.publishTrack(sound,{source:Track.Source.Microphone});
+          if(index!==connectionRef.current){stopTracks();captureCleanup.current=null;void active.disconnect();return;}
+          videoRef.current?.replaceChildren(canvas);
+          setBroadcasting(true);setLive(true);
+        }catch(e){
+          cancelAnimationFrame(frame);
+          rear?.getTracks().forEach(t=>t.stop());front?.getTracks().forEach(t=>t.stop());microphone?.getTracks().forEach(t=>t.stop());
+          captureCleanup.current?.();captureCleanup.current=null;
+          throw e;
+        }
       }
     }catch(e){if(room)void room.disconnect();if(index===connectionRef.current){activeRoomRef.current=null;setStatus('offline');setError(e instanceof Error?e.message:'Connection failed.');}}
   },[token,addMessage]);
 
   useEffect(()=>{
     void connect('viewer');
-    return ()=>{++connectionRef.current;const room=activeRoomRef.current;activeRoomRef.current=null;void room?.disconnect();};
+    return ()=>{++connectionRef.current;captureCleanup.current?.();captureCleanup.current=null;const room=activeRoomRef.current;activeRoomRef.current=null;void room?.disconnect();};
   },[connect]);
   useEffect(()=>{if(!admin && broadcasting)void connect('viewer');},[admin,broadcasting,connect]);
   useEffect(()=>{messagesEnd.current?.scrollIntoView({block:'nearest'});},[messages]);
@@ -143,6 +219,7 @@ export default function LiveStage({admin,token,username,userId,assignments,openL
       </div>
       <div className="player-meta"><span>● {live?'Streaming now':'Offline'}</span><span>👥 {watchers} watching</span></div>
       {error&&<div className="notice warning" role="alert">{error}</div>}
+      {cameraNotice&&broadcasting&&<div className="notice warning" role="status">{cameraNotice}</div>}
       {admin&&<div className="stream-controls"><div><b>Stream controls</b><small>Only your admin account can start the camera.</small></div>{broadcasting?<button className="danger" onClick={stop} disabled={busy}>END LIVE</button>:<button className="primary" onClick={start} disabled={busy}>{busy?'CONNECTING…':'● GO LIVE'}</button>}</div>}
     </section>
     <aside className="chat-panel card"><div className="chat-header"><div><span className="eyebrow">BREAK CHAT</span><h3>Talk with the Lounge</h3></div><span className="chat-status">{status==='connected'?'● Connected':status==='connecting'?'◌ Connecting':'○ Offline'}</span></div>
