@@ -4,7 +4,7 @@ import {useCallback,useEffect,useState,type FormEvent,type ChangeEvent} from 're
 import {type Session} from '@supabase/supabase-js';
 import LiveStage from '@/components/LiveStage';
 import MemberPicker from '@/components/MemberPicker';
-import {supabaseBrowser} from '@/lib/supabase';
+import {getRememberMe,setRememberMe,supabaseBrowser} from '@/lib/supabase';
 import {TEAMS,logo,type LoungeState,type BreakData} from '@/lib/teams';
 
 const db=supabaseBrowser();
@@ -22,6 +22,7 @@ export default function HomePage(){
   const [email,setEmail]=useState('');
   const [password,setPassword]=useState('');
   const [handle,setHandle]=useState('');
+  const [remember,setRemember]=useState(true);
   const [authBusy,setAuthBusy]=useState(false);
   const [authError,setAuthError]=useState('');
   const [state,setState]=useState<LoungeState>({current:null,breaks:[],assignments:{},hits:[]});
@@ -53,6 +54,8 @@ export default function HomePage(){
     return ()=>window.clearInterval(interval);
   },[refresh]);
 
+  useEffect(()=>{setRemember(getRememberMe());},[]);
+
   useEffect(()=>{
     if(!db){setAuthReady(true);return;}
     void db.auth.getSession().then(({data})=>{setSession(data.session);setAuthReady(true);});
@@ -82,8 +85,29 @@ export default function HomePage(){
         if(data.session){setAuthOpen(false);notify('Account created! Welcome to the Lounge.');}
         else{setAuthOpen(false);notify('Check your email to confirm your account, then sign in.');}
       }else{
-        const {error}=await db.auth.signInWithPassword({email:email.trim(),password});
-        if(error)throw error;
+        const identifier=email.trim();
+        if(!identifier)throw new Error('Enter your email or username.');
+        // Choose persistent device sign-in or just this browser tab BEFORE
+        // Supabase saves the authenticated session.
+        setRememberMe(remember);
+        if(identifier.includes('@')){
+          const {error}=await db.auth.signInWithPassword({email:identifier,password});
+          if(error)throw error;
+        }else{
+          const response=await fetch('/api/auth/username-login',{
+            method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({username:identifier,password}),
+            cache:'no-store',
+          });
+          const result=await response.json() as {error?:string;access_token?:string;refresh_token?:string};
+          if(!response.ok||!result.access_token||!result.refresh_token){
+            throw new Error(result.error||'Invalid username or password.');
+          }
+          const {error}=await db.auth.setSession({
+            access_token:result.access_token,refresh_token:result.refresh_token,
+          });
+          if(error)throw error;
+        }
         setAuthOpen(false);notify('You are signed in.');
       }
       setPassword('');
@@ -154,7 +178,7 @@ export default function HomePage(){
     </section>}
     </main>
     <footer>LANGEE <span>LOUNGE</span> <small>Wear your team. Bring the crew.</small></footer>
-    {authOpen&&<div className="modal-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setAuthOpen(false);}}><section className="card auth-dialog" role="dialog" aria-modal="true" aria-label={register?'Create account':'Sign in'}><button className="close" aria-label="Close" onClick={()=>setAuthOpen(false)}>✕</button><span className="eyebrow">YOUR LOUNGE ACCOUNT</span><h2>{register?'Create your username':'Welcome back'}</h2><p>{register?'Sign up so everyone knows who you are in chat.':'Sign in to chat and show your teams.'}</p><form onSubmit={authenticate}>{register&&<label>Username<input required minLength={3} maxLength={20} autoComplete="username" value={handle} onChange={e=>setHandle(e.target.value)} placeholder="CardCollector22"/></label>}<label>Email<input required type="email" autoComplete="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input required minLength={register?8:1} type="password" autoComplete={register?'new-password':'current-password'} value={password} onChange={e=>setPassword(e.target.value)}/></label>{authError&&<div className="notice warning" role="alert">{authError}</div>}<button className="primary" disabled={authBusy}>{authBusy?'ONE MOMENT…':register?'CREATE ACCOUNT':'SIGN IN'}</button></form><button className="auth-switch" onClick={()=>{setRegister(!register);setAuthError('');}}>{register?'Already have an account? Sign in':'New here? Create an account'}</button></section></div>}
+    {authOpen&&<div className="modal-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setAuthOpen(false);}}><section className="card auth-dialog" role="dialog" aria-modal="true" aria-label={register?'Create account':'Sign in'}><button className="close" aria-label="Close" onClick={()=>setAuthOpen(false)}>✕</button><span className="eyebrow">YOUR LOUNGE ACCOUNT</span><h2>{register?'Create your username':'Welcome back'}</h2><p>{register?'Sign up so everyone knows who you are in chat.':'Sign in to chat and show your teams.'}</p><form onSubmit={authenticate}>{register&&<label>Username<input required minLength={3} maxLength={20} autoComplete="username" value={handle} onChange={e=>setHandle(e.target.value)} placeholder="CardCollector22"/></label>}<label>{register?'Email':'Email or username'}<input required type={register?'email':'text'} autoComplete={register?'email':'username'} value={email} onChange={e=>setEmail(e.target.value)} placeholder={register?'you@example.com':'Email or username'}/></label><label>Password<input required minLength={register?8:1} type="password" autoComplete={register?'new-password':'current-password'} value={password} onChange={e=>setPassword(e.target.value)}/></label>{!register&&<label style={{display:'flex',alignItems:'center',gap:9,margin:'12px 0',cursor:'pointer'}}><input type="checkbox" checked={remember} onChange={e=>setRemember(e.target.checked)} style={{width:18,height:18,flexShrink:0}}/><span>Remember me on this device</span></label>}{authError&&<div className="notice warning" role="alert">{authError}</div>}<button className="primary" disabled={authBusy}>{authBusy?'ONE MOMENT…':register?'CREATE ACCOUNT':'SIGN IN'}</button></form><button className="auth-switch" onClick={()=>{setRegister(!register);setAuthError('');}}>{register?'Already have an account? Sign in':'New here? Create an account'}</button></section></div>}
   </>;
 }
 
